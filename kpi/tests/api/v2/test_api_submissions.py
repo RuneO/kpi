@@ -1648,6 +1648,48 @@ class SubmissionApiTests(SubmissionDeleteTestCaseMixin, BaseSubmissionTestCase):
         assert submission['_id'] not in response_ids
         assert len(response_ids) == len(self.submissions) - 1
 
+    def test_date_modified_same_second_cursor_uses_gte(self):
+        """Two changes in one second require an inclusive, overlap-safe cursor."""
+        submission = self.submissions_submitted_by_someuser[0]
+        instance = Instance.objects.get(pk=submission['_id'])
+        cursor = '2030-01-01T12:00:00'
+
+        # Two submission status changes are written in the same second. Both
+        # serialize to the same one-second timestamp exposed by the API.
+        with freeze_time('2030-01-01 12:00:00'):
+            instance.status = 'submitted'
+            instance.save()
+            instance.parsed_instance.update_mongo(asynchronous=False)
+            instance.status = 'complete'
+            instance.save()
+            instance.parsed_instance.update_mongo(asynchronous=False)
+
+        gt_response = self.client.get(
+            self.submission_list_url,
+            {
+                'format': 'json',
+                'query': '{"_date_modified": {"$gt": "2030-01-01T12:00:00"}}',
+            },
+        )
+        assert gt_response.status_code == status.HTTP_200_OK
+        assert submission['_id'] not in {
+            row['_id'] for row in gt_response.data['results']
+        }
+
+        gte_response = self.client.get(
+            self.submission_list_url,
+            {
+                'format': 'json',
+                'query': '{"_date_modified": {"$gte": "2030-01-01T12:00:00"}}',
+            },
+        )
+        assert gte_response.status_code == status.HTTP_200_OK
+        assert [row['_id'] for row in gte_response.data['results']] == [
+            submission['_id']
+        ]
+        assert gte_response.data['results'][0][DATE_MODIFIED] == cursor
+        assert gte_response.data['results'][0]['_status'] == 'complete'
+
     def test_inject_date_modified_if_not_present(self):
         """
         Submissions written before `_date_modified` was introduced do not have it
